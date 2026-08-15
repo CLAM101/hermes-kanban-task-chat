@@ -1,0 +1,376 @@
+From c73e10d37a9592a2e45d3080b7748ff75176f1bc Mon Sep 17 00:00:00 2001
+From: Darren Bullock <139537630+CLAM101@users.noreply.github.com>
+Date: Sat, 15 Aug 2026 08:50:34 +0000
+Subject: [PATCH] feat(desktop): add Kanban task action contributions
+
+---
+ apps/desktop/src/plugins/kanban/board.tsx     | 53 ++++++++++++++-
+ apps/desktop/src/plugins/kanban/drawer.tsx    | 13 ++++
+ .../src/plugins/kanban/task-actions.test.ts   | 34 ++++++++++
+ .../src/plugins/kanban/task-actions.ts        | 68 +++++++++++++++++++
+ apps/desktop/src/sdk/index.ts                 | 29 ++++++++
+ 5 files changed, 195 insertions(+), 2 deletions(-)
+ create mode 100644 apps/desktop/src/plugins/kanban/task-actions.test.ts
+ create mode 100644 apps/desktop/src/plugins/kanban/task-actions.ts
+
+diff --git a/apps/desktop/src/plugins/kanban/board.tsx b/apps/desktop/src/plugins/kanban/board.tsx
+index 3c4cdd9f9..2fef71894 100644
+--- a/apps/desktop/src/plugins/kanban/board.tsx
++++ b/apps/desktop/src/plugins/kanban/board.tsx
+@@ -80,6 +80,7 @@ import { BoardSwitcher } from './board-switcher'
+ import { TaskDrawer } from './drawer'
+ import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
+ import { OrchestrationPanel } from './orchestration'
++import { runKanbanTaskAction, taskActionContext, useKanbanTaskActions } from './task-actions'
+ import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
+ import {
+   $newTaskLane,
+@@ -237,6 +238,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
+ }
+ 
+ function Card({
++  board,
+   columns,
+   onDelete,
+   onMove,
+@@ -245,6 +247,7 @@ function Card({
+   selected,
+   task
+ }: {
++  board: string
+   columns: string[]
+   onDelete: (id: string) => void
+   onMove: (id: string, status: string) => void
+@@ -259,6 +262,8 @@ function Card({
+   const summary = task.latest_summary || task.body
+   const fallback = useDefaultAssignee()
+   const arc = arcState(task, fallback)
++  const cardActions = useKanbanTaskActions('card')
++  const menuActions = useKanbanTaskActions('context-menu')
+ 
+   return (
+     <ContextMenu>
+@@ -293,7 +298,35 @@ function Card({
+           {(arc === 'running' || arc === 'stale') && !dragging && !selected && (
+             <span aria-hidden className={cn('kanban-arc', arc === 'stale' && 'kanban-arc--stale')} />
+           )}
+-          <span className="line-clamp-2 text-[0.8125rem] font-medium leading-snug text-foreground">
++          {cardActions.length > 0 && (
++            <div
++              className="absolute top-1.5 right-1.5 z-10 flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
++              onMouseDown={event => event.stopPropagation()}
++            >
++              {cardActions.map(action => (
++                <button
++                  aria-label={action.label}
++                  className="grid size-6 place-items-center rounded text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground"
++                  draggable={false}
++                  key={action.id}
++                  onClick={event => {
++                    event.stopPropagation()
++                    void runKanbanTaskAction(action, taskActionContext(board, 'card', task))
++                  }}
++                  title={action.label}
++                  type="button"
++                >
++                  <Codicon name={action.codicon || 'comment-discussion'} size="0.85rem" />
++                </button>
++              ))}
++            </div>
++          )}
++          <span
++            className={cn(
++              'line-clamp-2 text-[0.8125rem] font-medium leading-snug text-foreground',
++              cardActions.length > 0 && 'pr-6'
++            )}
++          >
+             {task.title || task.id}
+           </span>
+           {summary && (
+@@ -311,6 +344,15 @@ function Card({
+           <Codicon name={selected ? 'close' : 'check-all'} size="0.85rem" />
+           {selected ? k.deselect : k.select}
+         </ContextMenuItem>
++        {menuActions.map(action => (
++          <ContextMenuItem
++            key={action.id}
++            onSelect={() => void runKanbanTaskAction(action, taskActionContext(board, 'context-menu', task))}
++          >
++            <Codicon name={action.codicon || 'comment-discussion'} size="0.85rem" />
++            {action.label}
++          </ContextMenuItem>
++        ))}
+         <ContextMenuSeparator />
+         {columns
+           .filter(name => name !== task.status && !isLockedTarget(name))
+@@ -333,6 +375,7 @@ function Card({
+ // ── column ───────────────────────────────────────────────────────────────────
+ 
+ function Column({
++  board,
+   collapsed,
+   column,
+   columns,
+@@ -345,6 +388,7 @@ function Column({
+   onToggleSelect,
+   selected
+ }: {
++  board: string
+   collapsed: boolean
+   column: { name: string; tasks: KanbanTask[] }
+   columns: string[]
+@@ -471,6 +515,7 @@ function Column({
+                 </div>
+                 {tasks.map(task => (
+                   <Card
++                    board={board}
+                     columns={columns}
+                     key={task.id}
+                     onDelete={onDelete}
+@@ -485,6 +530,7 @@ function Column({
+             ))
+           : column.tasks.map(task => (
+               <Card
++                board={board}
+                 columns={columns}
+                 key={task.id}
+                 onDelete={onDelete}
+@@ -1083,6 +1129,8 @@ export function KanbanBoardPage() {
+   const qc = useQueryClient()
+   const slug = useValue($boardSlug)
+   const [archived, setArchived] = useState(false)
++  const { data: boards } = useQuery({ queryFn: fetchBoards, queryKey: BOARDS_KEY, staleTime: 30_000 })
++  const resolvedSlug = slug || boards?.current || 'default'
+ 
+   // Live updates ride the events socket (bindApi); this interval is only the
+   // slow heartbeat for socketless paths (OAuth remotes, dropped connections).
+@@ -1396,6 +1444,7 @@ export function KanbanBoardPage() {
+ 
+             return (
+               <Column
++                board={resolvedSlug}
+                 collapsed={laneOverrides[col.name] ?? auto}
+                 column={col}
+                 columns={columnNames}
+@@ -1424,7 +1473,7 @@ export function KanbanBoardPage() {
+       )}
+ 
+       <NewTaskDialog onClose={() => setAddStatus(null)} parents={parentOptions} target={addStatus} />
+-      <TaskDrawer columns={columnNames} id={openId} onClose={() => setOpenId(null)} onOpen={setOpenId} />
++      <TaskDrawer board={resolvedSlug} columns={columnNames} id={openId} onClose={() => setOpenId(null)} onOpen={setOpenId} />
+     </div>
+   )
+ }
+diff --git a/apps/desktop/src/plugins/kanban/drawer.tsx b/apps/desktop/src/plugins/kanban/drawer.tsx
+index 77ed9539c..69c6e8cb9 100644
+--- a/apps/desktop/src/plugins/kanban/drawer.tsx
++++ b/apps/desktop/src/plugins/kanban/drawer.tsx
+@@ -46,6 +46,7 @@ import {
+   uploadAttachment
+ } from './api'
+ import { ModelOverrideField, overridePatch } from './model-override'
++import { runKanbanTaskAction, taskActionContext, useKanbanTaskActions } from './task-actions'
+ import {
+   type Diagnostic,
+   type DiagnosticAction,
+@@ -538,11 +539,13 @@ function EstimateSection({ id }: { id: string }) {
+ }
+ 
+ export function TaskDrawer({
++  board,
+   columns,
+   id,
+   onClose,
+   onOpen
+ }: {
++  board: string
+   columns: string[]
+   id: null | string
+   onClose: () => void
+@@ -551,6 +554,7 @@ export function TaskDrawer({
+   const k = useKanban()
+   const qc = useQueryClient()
+   const slug = useValue($boardSlug)
++  const taskActions = useKanbanTaskActions('drawer-menu')
+ 
+   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
+   const { data: detail, error } = useQuery({
+@@ -718,6 +722,15 @@ export function TaskDrawer({
+                     <Codicon name="copy" size="0.85rem" />
+                     {k.copyTitle}
+                   </DropdownMenuItem>
++                  {taskActions.map(action => (
++                    <DropdownMenuItem
++                      key={action.id}
++                      onSelect={() => void runKanbanTaskAction(action, taskActionContext(board, 'drawer-menu', task))}
++                    >
++                      <Codicon name={action.codicon || 'comment-discussion'} size="0.85rem" />
++                      {action.label}
++                    </DropdownMenuItem>
++                  ))}
+                   <DropdownMenuSeparator />
+                   <DropdownMenuItem onSelect={mutate(() => patchTask(task.id, { status: 'archived' }), onClose)}>
+                     <Codicon name="archive" size="0.85rem" />
+diff --git a/apps/desktop/src/plugins/kanban/task-actions.test.ts b/apps/desktop/src/plugins/kanban/task-actions.test.ts
+new file mode 100644
+index 000000000..797b7c7ca
+--- /dev/null
++++ b/apps/desktop/src/plugins/kanban/task-actions.test.ts
+@@ -0,0 +1,34 @@
++import type { Contribution } from '@hermes/plugin-sdk'
++import { describe, expect, it, vi } from 'vitest'
++
++import { resolveKanbanTaskActions } from './task-actions'
++
++const action = (overrides: Record<string, unknown> = {}): Contribution => ({
++  area: 'kanban.task.actions',
++  data: { label: 'Discuss task', run: vi.fn(), ...overrides },
++  id: 'plugin:test:discuss'
++})
++
++describe('resolveKanbanTaskActions', () => {
++  it('keeps valid actions in contribution order', () => {
++    const resolved = resolveKanbanTaskActions([action(), action({ label: ' Second ' })], 'card')
++
++    expect(resolved.map(item => item.label)).toEqual(['Discuss task', 'Second'])
++  })
++
++  it('filters actions that do not target the requested location', () => {
++    const resolved = resolveKanbanTaskActions([action({ locations: ['drawer-menu'] })], 'card')
++
++    expect(resolved).toEqual([])
++  })
++
++  it('drops malformed payloads instead of breaking the Kanban host', () => {
++    const malformed = [
++      { area: 'kanban.task.actions', data: null, id: 'null' },
++      action({ label: '' }),
++      action({ run: 'not-a-function' })
++    ] satisfies Contribution[]
++
++    expect(resolveKanbanTaskActions(malformed, 'card')).toEqual([])
++  })
++})
+\ No newline at end of file
+diff --git a/apps/desktop/src/plugins/kanban/task-actions.ts b/apps/desktop/src/plugins/kanban/task-actions.ts
+new file mode 100644
+index 000000000..0d01ab8f0
+--- /dev/null
++++ b/apps/desktop/src/plugins/kanban/task-actions.ts
+@@ -0,0 +1,68 @@
++import {
++  host,
++  KANBAN_TASK_ACTIONS_AREA,
++  type KanbanTaskActionContext,
++  type KanbanTaskActionContribution,
++  type KanbanTaskActionLocation,
++  useContributions
++} from '@hermes/plugin-sdk'
++
++import type { KanbanTask } from './types'
++
++export interface ResolvedKanbanTaskAction extends KanbanTaskActionContribution {
++  id: string
++}
++
++export function resolveKanbanTaskActions(
++  contributions: ReturnType<typeof useContributions>,
++  location: KanbanTaskActionLocation
++): ResolvedKanbanTaskAction[] {
++  return contributions.flatMap(contribution => {
++    const action = contribution.data as KanbanTaskActionContribution | null | undefined
++
++    if (!action || typeof action.label !== 'string' || !action.label.trim() || typeof action.run !== 'function') {
++      return []
++    }
++
++    if (action.locations && !action.locations.includes(location)) {
++      return []
++    }
++
++    return [{ ...action, id: contribution.id, label: action.label.trim() }]
++  })
++}
++
++export function useKanbanTaskActions(location: KanbanTaskActionLocation): ResolvedKanbanTaskAction[] {
++  return resolveKanbanTaskActions(useContributions(KANBAN_TASK_ACTIONS_AREA), location)
++}
++
++export function taskActionContext(
++  board: string,
++  location: KanbanTaskActionLocation,
++  task: KanbanTask
++): KanbanTaskActionContext {
++  return {
++    board,
++    location,
++    task: {
++      assignee: task.assignee,
++      body: task.body,
++      id: task.id,
++      priority: task.priority,
++      status: task.status,
++      tenant: task.tenant,
++      title: task.title
++    }
++  }
++}
++
++export async function runKanbanTaskAction(
++  action: ResolvedKanbanTaskAction,
++  context: KanbanTaskActionContext
++): Promise<void> {
++  try {
++    await action.run(context)
++  } catch (error) {
++    host.notifyError(error, `Could not run ${action.label}`)
++  }
++}
+\ No newline at end of file
+diff --git a/apps/desktop/src/sdk/index.ts b/apps/desktop/src/sdk/index.ts
+index 7d13ada9a..e4b7e5e78 100644
+--- a/apps/desktop/src/sdk/index.ts
++++ b/apps/desktop/src/sdk/index.ts
+@@ -277,6 +277,9 @@ export type {
+  *  `ctx.register` stays the door for permanent contributions. Namespace the
+  *  id with your plugin slug (`kanban:board-switcher`). */
+ export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
++/** Subscribe to the resolved contributions for a custom data area. Prefer a
++ * feature-specific wrapper when consuming these records inside core UI. */
++export { useContributions } from '@/contrib/react/use-contributions'
+ export type { Contribution } from '@/contrib/types'
+ /** Grab-to-pan for overflow containers (boards, timelines, wide tables) —
+  *  the shared scrub primitive; don't hand-roll drag-to-scroll. */
+@@ -311,6 +314,32 @@ export { profileColor, profileColorSoft } from '@/lib/profile-color'
+ export { queryClient } from '@/lib/query-client'
+ 
+ export const PANES_AREA = 'panes'
++/** Kanban card/drawer actions contributed by desktop plugins. The Kanban host
++ * owns rendering; plugins provide a declarative label/icon plus a callback. */
++export const KANBAN_TASK_ACTIONS_AREA = 'kanban.task.actions'
++export type KanbanTaskActionLocation = 'card' | 'context-menu' | 'drawer-menu'
++export interface KanbanTaskActionContext {
++  /** Concrete board slug, never the empty "current board" sentinel. */
++  board: string
++  location: KanbanTaskActionLocation
++  task: {
++    assignee?: null | string
++    body?: null | string
++    id: string
++    priority?: number
++    status: string
++    tenant?: null | string
++    title: string
++  }
++}
++export interface KanbanTaskActionContribution {
++  /** VS Code codicon id rendered by the Kanban host. */
++  codicon?: string
++  label: string
++  /** Omit for all supported locations. */
++  locations?: readonly KanbanTaskActionLocation[]
++  run: (context: KanbanTaskActionContext) => Promise<void> | void
++}
+ /** Hermes' reasoning levels + their compact labels, so a plugin surfacing a
+  *  thinking depth uses the same scale and spelling as the rest of the app. */
+ export {
