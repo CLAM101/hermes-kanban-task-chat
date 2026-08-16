@@ -1,0 +1,7 @@
+name: hermes-kanban-task-chat
+version: 0.1.0
+description: "Persistent operator discussion sessions for Hermes Kanban cards, with bounded live context and scoped task-edit tools."
+author: Darren Bullock
+kind: standalone
+provides_tools:
+  - kanban_task_update
